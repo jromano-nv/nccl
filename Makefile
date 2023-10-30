@@ -16,6 +16,10 @@ LICENSE_FILES := LICENSE.txt
 LICENSE_TARGETS := $(LICENSE_FILES:%=$(BUILDDIR)/%)
 lic: $(LICENSE_TARGETS)
 
+# add symbols
+CXXFLAGS += -O3 -g
+NVCUFLAGS += -O3 -g
+
 ${BUILDDIR}/%.txt: %.txt
 	@printf "Copying    %-35s > %s\n" $< $@
 	mkdir -p ${BUILDDIR}
