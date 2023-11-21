@@ -45,6 +45,7 @@ static int ncclNIbDevs = -1;
 struct alignas(64) ncclIbDev {
   pthread_mutex_t lock;
   int device;
+  int backupDevice;
   uint64_t guid;
   uint8_t port;
   uint8_t link;
@@ -156,6 +157,24 @@ static int ncclIbRelaxedOrderingCapable(void) {
   return r == ncclInternalError ? 0 : 1;
 }
 
+
+static void ncclSelectBackupDevices()
+{
+  if (ncclNIbDevs < 2) {
+    for (int i = 0; i < ncclNIbDevs; i++) {
+      ncclIbDevs[i].backupDevice = -1;
+    }
+  } else {
+    for (int i = 0; i < ncclNIbDevs; i++) {
+      if (i % 2 == 0) {
+        ncclIbDevs[i].backupDevice = (i != (ncclNIbDevs - 1)) ? i + 1 : i - 1;
+      } else {
+        ncclIbDevs[i].backupDevice = i - 1;
+      }
+    }
+  }
+}
+
 ncclResult_t ncclIbInit(ncclDebugLogger_t logFunction) {
   if (ncclParamIbDisable()) return ncclInternalError;
   static int shownIbHcaEnv = 0;
@@ -251,13 +270,15 @@ ncclResult_t ncclIbInit(ncclDebugLogger_t logFunction) {
     if (ncclNIbDevs == 0) {
       INFO(NCCL_INIT|NCCL_NET, "NET/IB : No device found.");
     } else {
+      ncclSelectBackupDevices();
+      printf("Selecting backup devices\n");
       char line[1024];
       line[0] = '\0';
       // Determine whether RELAXED_ORDERING is enabled and possible
       ncclIbRelaxedOrderingEnabled = ncclIbRelaxedOrderingCapable();
       for (int d=0; d<ncclNIbDevs; d++) {
-        snprintf(line+strlen(line), 1023-strlen(line), " [%d]%s:%d/%s", d, ncclIbDevs[d].devName,
-            ncclIbDevs[d].port, ncclIbDevs[d].link == IBV_LINK_LAYER_INFINIBAND ? "IB" : "RoCE");
+        snprintf(line+strlen(line), 1023-strlen(line), " [%d]%s:%d/%s backup: %d", d, ncclIbDevs[d].devName,
+            ncclIbDevs[d].port, ncclIbDevs[d].link == IBV_LINK_LAYER_INFINIBAND ? "IB" : "RoCE", ncclIbDevs[d].backupDevice);
       }
       line[1023] = '\0';
       char addrline[SOCKET_NAME_MAXLEN+1];
