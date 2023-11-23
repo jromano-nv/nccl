@@ -271,7 +271,6 @@ ncclResult_t ncclIbInit(ncclDebugLogger_t logFunction) {
       INFO(NCCL_INIT|NCCL_NET, "NET/IB : No device found.");
     } else {
       ncclSelectBackupDevices();
-      printf("Selecting backup devices\n");
       char line[1024];
       line[0] = '\0';
       // Determine whether RELAXED_ORDERING is enabled and possible
@@ -444,9 +443,12 @@ struct ncclIbRequest {
 
 struct ncclIbVerbs {
   int dev;
+  int backupDev; // duplcate of ncclIbDevs[dev].backupDevice
   struct ibv_pd* pd; // duplicate of ncclIbDevs[dev].pd
   struct ibv_cq* cq;
-  uint64_t pad[1];
+  struct ibv_pd* backupPd; // duplicate of ncclIbDevs[ncclIbDevs[dev].backupDevice].pd
+  struct ibv_cq* backupCq;
+  uint64_t pad[3];
   struct ncclIbRequest reqs[MAX_REQUESTS];
 };
 
@@ -481,6 +483,9 @@ struct ncclIbSendComm {
   struct ibv_mr* fifoMr;
   int ar;
   struct ncclIbGidInfo gidInfo;
+  struct ncclIbVerbs backupVerbs;
+  struct ibv_qp* backup_qps[NCCL_IB_MAX_QPS];
+  bool isUsingBackup;
 };
 // The SendFifo needs to be 32-byte aligned and each element needs
 // to be a 32-byte multiple, so that an entry does not get split and
@@ -523,6 +528,9 @@ NCCL_PARAM(IbQpsPerConn, "IB_QPS_PER_CONNECTION", 1);
 
 ncclResult_t ncclIbInitVerbs(int dev, struct ibv_context* ctx, struct ncclIbVerbs* verbs) {
   verbs->dev = dev;
+  verbs->backupDev = ncclIbDevs[dev].backupDevice;
+
+  bool hasBackup = verbs->backupDev >= 0;
 
   pthread_mutex_lock(&ncclIbDevs[dev].lock);
   if (0 == ncclIbDevs[dev].pdRefs++) {
@@ -534,11 +542,26 @@ ncclResult_t ncclIbInitVerbs(int dev, struct ibv_context* ctx, struct ncclIbVerb
       return res;
     }
   }
+  if (hasBackup) {
+    if (0 == ncclIbDevs[verbs->backupDev].pdRefs++) {
+      ncclResult_t res;
+      NCCLCHECKGOTO(wrap_ibv_alloc_pd(&ncclIbDevs[verbs->backupDev].pd, ncclIbDevs[verbs->backupDev].context), res, backup_failure);
+      if (0) {
+backup_failure:
+        pthread_mutex_unlock(&ncclIbDevs[dev].lock);
+        return res;
+      }
+    }
+  }
   verbs->pd = ncclIbDevs[dev].pd;
+  if (hasBackup) verbs->backupPd = ncclIbDevs[verbs->backupDev].pd;
   pthread_mutex_unlock(&ncclIbDevs[dev].lock);
 
   // Recv requests can generate 2 completions (one for the post FIFO, one for the Recv).
   NCCLCHECK(wrap_ibv_create_cq(&verbs->cq, ctx, 2*MAX_REQUESTS*ncclParamIbQpsPerConn(), NULL, NULL, 0));
+  if (hasBackup) {
+    NCCLCHECK(wrap_ibv_create_cq(&verbs->backupCq, ncclIbDevs[verbs->backupDev].context, 2*MAX_REQUESTS*ncclParamIbQpsPerConn(), NULL, NULL, 0));
+  }
   return ncclSuccess;
 }
 
@@ -556,7 +579,8 @@ returning:
   return res;
 }
 
-ncclResult_t ncclIbCreateQp(uint8_t ib_port, struct ncclIbVerbs* verbs, int access_flags, struct ibv_qp** qp) {
+ncclResult_t ncclIbCreateQp(struct ncclIbVerbs* verbs, int access_flags, struct ibv_qp** qp) {
+  int ib_port = ncclIbDevs[verbs->dev].port;
   struct ibv_qp_init_attr qpInitAttr;
   memset(&qpInitAttr, 0, sizeof(struct ibv_qp_init_attr));
   qpInitAttr.send_cq = verbs->cq;
@@ -664,13 +688,23 @@ ib_connect_check:
 
   // IB Setup
   struct ibv_context* ctx;
+  bool hasBackup;
+  hasBackup = ncclIbDevs[dev].backupDevice >= 0; 
   ctx = ncclIbDevs[dev].context;
   NCCLCHECK(ncclIbInitVerbs(dev, ctx, &comm->verbs));
   uint8_t ib_port;
   ib_port = ncclIbDevs[dev].port;
+  uint8_t  backup_port;
+  backup_port = hasBackup ? ncclIbDevs[ncclIbDevs[dev].backupDevice].port : -1;
   comm->nqps = ncclParamIbQpsPerConn();
   for (int q=0; q<comm->nqps; q++) {
-    NCCLCHECK(ncclIbCreateQp(ib_port, &comm->verbs, IBV_ACCESS_REMOTE_WRITE, comm->qps+q));
+    NCCLCHECK(ncclIbCreateQp(&comm->verbs, IBV_ACCESS_REMOTE_WRITE, comm->qps+q));
+    /*
+    if (ncclIbDevs[dev].backupDevice != -1) {
+      // XXX - here
+      NCCLCHECK(ncclIbCreateQp(ib_port, &comm->verbs, IBV_ACCESS_REMOTE_WRITE, comm->qps+q));
+    }
+    */
   }
   comm->ar = ncclIbDevs[dev].ar; // ADAPTIVE_ROUTING
 
@@ -821,7 +855,7 @@ ib_recv:
   NCCLCHECK(ncclIbInitVerbs(lComm->dev, ctx, &rComm->verbs));
   rComm->nqps = ncclParamIbQpsPerConn();
   for (int q=0; q<rComm->nqps; q++) {
-    NCCLCHECK(ncclIbCreateQp(ib_port, &rComm->verbs, IBV_ACCESS_REMOTE_WRITE, rComm->qps+q));
+    NCCLCHECK(ncclIbCreateQp(&rComm->verbs, IBV_ACCESS_REMOTE_WRITE, rComm->qps+q));
   }
 
   // Adjust the MTU
@@ -862,7 +896,7 @@ ib_recv:
     rComm->gpuFlush.sge.addr = (uint64_t)&rComm->gpuFlush.hostMem;
     rComm->gpuFlush.sge.length = 1;
     rComm->gpuFlush.sge.lkey = rComm->gpuFlush.hostMr->lkey;
-    NCCLCHECK(ncclIbCreateQp(ib_port, &rComm->verbs, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ, &rComm->gpuFlush.qp));
+    NCCLCHECK(ncclIbCreateQp(&rComm->verbs, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ, &rComm->gpuFlush.qp));
     struct ncclIbQpInfo localQpInfo;
     localQpInfo.lid=portAttr.lid;
     localQpInfo.link_layer=portAttr.link_layer;
