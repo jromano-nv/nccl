@@ -579,12 +579,12 @@ returning:
   return res;
 }
 
-ncclResult_t ncclIbCreateQp(struct ncclIbVerbs* verbs, int access_flags, struct ibv_qp** qp) {
-  int ib_port = ncclIbDevs[verbs->dev].port;
+ncclResult_t ncclIbCreateQp(struct ncclIbVerbs* verbs, int access_flags, struct ibv_qp** qp, bool useBackup) {
+  int ib_port = useBackup ? ncclIbDevs[verbs->backupDev].port : ncclIbDevs[verbs->dev].port;
   struct ibv_qp_init_attr qpInitAttr;
   memset(&qpInitAttr, 0, sizeof(struct ibv_qp_init_attr));
-  qpInitAttr.send_cq = verbs->cq;
-  qpInitAttr.recv_cq = verbs->cq;
+  qpInitAttr.send_cq = useBackup ? verbs->backupCq : verbs->cq;
+  qpInitAttr.recv_cq = useBackup ? verbs->backupCq : verbs->cq;
   qpInitAttr.qp_type = IBV_QPT_RC;
   // We might send 2 messages per send (RDMA and RDMA_WITH_IMM)
   qpInitAttr.cap.max_send_wr = 2*MAX_REQUESTS;
@@ -592,7 +592,7 @@ ncclResult_t ncclIbCreateQp(struct ncclIbVerbs* verbs, int access_flags, struct 
   qpInitAttr.cap.max_send_sge = 1;
   qpInitAttr.cap.max_recv_sge = 1;
   qpInitAttr.cap.max_inline_data = ncclParamIbUseInline() ? sizeof(struct ncclIbSendFifo) : 0;
-  NCCLCHECK(wrap_ibv_create_qp(qp, verbs->pd, &qpInitAttr));
+  NCCLCHECK(wrap_ibv_create_qp(qp, useBackup ? verbs->backupPd : verbs->pd, &qpInitAttr));
   struct ibv_qp_attr qpAttr;
   memset(&qpAttr, 0, sizeof(struct ibv_qp_attr));
   qpAttr.qp_state = IBV_QPS_INIT;
@@ -698,14 +698,12 @@ ib_connect_check:
   backup_port = hasBackup ? ncclIbDevs[ncclIbDevs[dev].backupDevice].port : -1;
   comm->nqps = ncclParamIbQpsPerConn();
   for (int q=0; q<comm->nqps; q++) {
-    NCCLCHECK(ncclIbCreateQp(&comm->verbs, IBV_ACCESS_REMOTE_WRITE, comm->qps+q));
-    /*
+    NCCLCHECK(ncclIbCreateQp(&comm->verbs, IBV_ACCESS_REMOTE_WRITE, comm->qps+q, false));
     if (ncclIbDevs[dev].backupDevice != -1) {
-      // XXX - here
-      NCCLCHECK(ncclIbCreateQp(ib_port, &comm->verbs, IBV_ACCESS_REMOTE_WRITE, comm->qps+q));
+      NCCLCHECK(ncclIbCreateQp(&comm->verbs, IBV_ACCESS_REMOTE_WRITE, comm->backup_qps + q, true));
     }
-    */
   }
+  // XXX what happens for AR on backup device
   comm->ar = ncclIbDevs[dev].ar; // ADAPTIVE_ROUTING
 
   // Send my QP Info to receiver through the socket. Hope this won't block.
@@ -855,7 +853,7 @@ ib_recv:
   NCCLCHECK(ncclIbInitVerbs(lComm->dev, ctx, &rComm->verbs));
   rComm->nqps = ncclParamIbQpsPerConn();
   for (int q=0; q<rComm->nqps; q++) {
-    NCCLCHECK(ncclIbCreateQp(&rComm->verbs, IBV_ACCESS_REMOTE_WRITE, rComm->qps+q));
+    NCCLCHECK(ncclIbCreateQp(&rComm->verbs, IBV_ACCESS_REMOTE_WRITE, rComm->qps+q, false));
   }
 
   // Adjust the MTU
@@ -896,7 +894,7 @@ ib_recv:
     rComm->gpuFlush.sge.addr = (uint64_t)&rComm->gpuFlush.hostMem;
     rComm->gpuFlush.sge.length = 1;
     rComm->gpuFlush.sge.lkey = rComm->gpuFlush.hostMr->lkey;
-    NCCLCHECK(ncclIbCreateQp(&rComm->verbs, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ, &rComm->gpuFlush.qp));
+    NCCLCHECK(ncclIbCreateQp(&rComm->verbs, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ, &rComm->gpuFlush.qp, false));
     struct ncclIbQpInfo localQpInfo;
     localQpInfo.lid=portAttr.lid;
     localQpInfo.link_layer=portAttr.link_layer;
