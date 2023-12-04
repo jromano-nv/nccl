@@ -923,7 +923,7 @@ ib_recv:
   if (stage->offset != sizeof(remQpInfo)) return ncclSuccess;
 
   /* copy back the received info */
-  memcpy(&remQpInfo, stage->buffer, sizeof(struct ncclIbQpInfo));
+  memcpy(&remQpInfo, stage->buffer, sizeof(remQpInfo));
 
   // XXX backup GID?
   rComm->gidInfo.remoteGid.global.subnet_prefix = remQpInfo[PRIMARY].spn;
