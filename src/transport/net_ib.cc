@@ -165,7 +165,11 @@ static int ncclIbRelaxedOrderingCapable(void) {
 
 static void ncclSelectBackupDevices()
 {
-  if (ncclNIbDevs < 2) {
+  char *use_backup_env = getenv("NCCL_USE_BACKUP");
+  bool use_backup = use_backup_env != NULL && atoi(use_backup_env) != 0;
+
+  if (ncclNIbDevs < 2 || !use_backup) {
+    WARN("NCCL backup is disabled");
     for (int i = 0; i < ncclNIbDevs; i++) {
       ncclIbDevs[i].backupDevice = -1;
     }
@@ -176,6 +180,7 @@ static void ncclSelectBackupDevices()
       } else {
         ncclIbDevs[i].backupDevice = i - 1;
       }
+      INFO(NCCL_ALL, "Device %d uses %d as backup", i, ncclIbDevs[i].backupDevice);
     }
   }
 }
