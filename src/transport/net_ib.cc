@@ -558,6 +558,8 @@ ncclResult_t ncclIbInitVerbs(int dev, struct ibv_context* ctx, struct ncclIbVerb
       return res;
     }
   }
+
+  verbs->pd = ncclIbDevs[dev].pd;
   if (hasBackup) {
     if (0 == ncclIbDevs[verbs->backupDev].pdRefs++) {
       ncclResult_t res;
@@ -568,9 +570,8 @@ backup_failure:
         return res;
       }
     }
+    verbs->backupPd = ncclIbDevs[verbs->backupDev].pd;
   }
-  verbs->pd = ncclIbDevs[dev].pd;
-  if (hasBackup) verbs->backupPd = ncclIbDevs[verbs->backupDev].pd;
   pthread_mutex_unlock(&ncclIbDevs[dev].lock);
 
   // Recv requests can generate 2 completions (one for the post FIFO, one for the Recv).
@@ -1121,6 +1122,7 @@ ncclResult_t ncclIbFreeRequest(struct ncclIbRequest* r) {
 
 ncclResult_t ncclIbTest(void* request, int* done, int* size);
 
+// XXX - Memory regions need be registered to backup PD as well
 /* DMA-BUF support */
 ncclResult_t ncclIbRegMrDmaBuf(void* comm, void* data, size_t size, int type, uint64_t offset, int fd, void** mhandle) {
   static_assert(offsetof(struct ncclIbSendComm, verbs) == offsetof(struct ncclIbRecvComm, verbs), "Send and recv comms must have verbs at the same offset");
